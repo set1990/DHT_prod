@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <math.h> 
 #include <esp_http_server.h>
+#include <time.h>
 #include "esp_eth_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
@@ -81,8 +82,6 @@ char data[] = "api_key=%s&field1=%.2f&field2=%.2f";
 
 static EventGroupHandle_t s_wifi_event_group;
 
-esp_http_client_handle_t client;
-
 esp_vfs_spiffs_conf_t conf_memory = { .base_path = "/spiffs",
 							   		  .partition_label = NULL,
       						   		  .max_files = 5,
@@ -92,6 +91,7 @@ SemaphoreHandle_t DHT_11_Mutex;
 SemaphoreHandle_t file_Mutex;
 SemaphoreHandle_t send_Mutex;
 SemaphoreHandle_t memory_Mutex;
+SemaphoreHandle_t server_Mutex;
 nvs_handle_t my_nvs_handle;  
 
 static int s_retry_num = 0;
@@ -101,6 +101,7 @@ float hum;
 
 float temp_memory[MAX_MEASURMENT_TEMP] = {0};
 float hum_memory[MAX_MEASURMENT_TEMP] = {0};
+time_t time_memory[MAX_MEASURMENT_TEMP] = {0};
 
 
 
@@ -316,26 +317,20 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
 
 /*----------------------------------------------------------- thingspeak ----------------------------------------------------------------*/
 
-void thingspeak_init()
+void thingspeak_send_data(float temp, float hum)
 {
+	char api_key[32] = {0};
+	char post_data[200];
+	esp_err_t err;
 	esp_http_client_config_t config = { .url = thingspeak_url,
 										.method = HTTP_METHOD_GET,
 										.auth_type = HTTP_AUTH_TYPE_BASIC,
 										.transport_type = HTTP_TRANSPORT_OVER_SSL,
 										.crt_bundle_attach = esp_crt_bundle_attach,
 									  };
-	client = esp_http_client_init(&config);
-	esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");	
-	ESP_LOGI(TAG_TS, "Message sent Failed hard");					  
-}
-
-
-void thingspeak_send_data(float temp, float hum)
-{
-	char api_key[32] = {0};
-	char post_data[200];
-	esp_err_t err;
 	if(APIkey==NULL) return;
+	esp_http_client_handle_t client = esp_http_client_init(&config);
+	esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");	
 	strcpy(post_data, "");
 	strcpy(api_key, APIkey);
 	snprintf(post_data, sizeof(post_data), data, api_key, temp, hum);
@@ -352,6 +347,7 @@ void thingspeak_send_data(float temp, float hum)
 	{
 		ESP_LOGI(TAG_TS, "Message sent Failed hard");
 	}
+	esp_http_client_cleanup(client);
 }
 
 /*---------------------------------------------------------------------------------------------------------------------------------------*/
@@ -407,15 +403,13 @@ void memory_init(void)
     ESP_LOGI(TAG_ME, "file OK");
 }   
 
-void memory_write(float* temp, float* hum)
+void memory_write(float* temp, float* hum, time_t* tim)
 {    
-	time_t now;
-    time(&now);
 	xSemaphoreTake(send_Mutex, portMAX_DELAY);
     for (uint_fast8_t i=0; i<MAX_MEASURMENT_TEMP; i++) 
     {
 		if((temp[i]>99.0)||(hum[i]>99.0)) continue;
-		fprintf(file, "%.2f, %.2f, +%lld[s]\n", temp[i], hum[i], now-(i*TIME_msr));
+		fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
 	}
 	fgetpos(file, &file_pos);
 	fflush(file);
@@ -529,6 +523,7 @@ void nvs_format()
 
 
 /*-----------------------------------------------------  Measurement --------------------------------------------------------------------*/
+
 bool DHT_check_value(float t, float h)
 {
 	static float t_prew = 0.0;
@@ -549,20 +544,22 @@ bool DHT_check_value(float t, float h)
 		return false;
 	}
 	cnt++;
-	vTaskDelay(pdMS_TO_TICKS(100));
+	vTaskDelay(pdMS_TO_TICKS(200));
 	return true;
 }
-
 
 void DHT_readings(void *pvParameters)
 {
 	dht11_t dht11_sensor;
-	uint8_t ms_correct = 0;
+	int8_t ms_correct = 0;
+	int32_t delay_ms = 0;
     dht11_sensor.dht11_pin = CONFIG_DHT11_PIN;
     ESP_LOGI(TAG_DH, "Start!!" );
     xSemaphoreTake(file_Mutex, portMAX_DELAY);
+    xSemaphoreTake(server_Mutex, portMAX_DELAY);
 	while(true)
 	{
+		ms_correct = 0;
 		if (xSemaphoreTake(DHT_11_Mutex, portMAX_DELAY))
 		{
 			do 
@@ -571,7 +568,6 @@ void DHT_readings(void *pvParameters)
 				{  
     				temp = dht11_sensor.temperature;
     				hum = dht11_sensor.humidity;
-    				xSemaphoreGive(DHT_11_Mutex);
 				}
 				else 
 				{
@@ -580,20 +576,47 @@ void DHT_readings(void *pvParameters)
 				}
 				ms_correct++;
 			} while(DHT_check_value(temp,hum));
-			temp_memory[measurment_position] = temp;
- 			hum_memory[measurment_position] = hum;
- 			measurment_position++;
- 			if(measurment_position>=MAX_MEASURMENT_TEMP)
- 			{
-				measurment_position = 0; 
-				xSemaphoreGive(file_Mutex);
-				vTaskDelay(pdMS_TO_TICKS(100));
-				ms_correct++;
-				xSemaphoreTake(file_Mutex,portMAX_DELAY);
-			} 
-		}
-		if(TS_active) thingspeak_send_data(temp, hum);
-		vTaskDelay(pdMS_TO_TICKS((TIME_msr*1000)-((ms_correct-1)*100)));
+			xSemaphoreGive(DHT_11_Mutex);
+			if((temp<99.0) && (hum<99.0))
+			{
+				temp_memory[measurment_position] = temp;
+ 				hum_memory[measurment_position] = hum;
+ 				time(&time_memory[measurment_position]);
+ 				measurment_position++;
+ 				if(measurment_position>=MAX_MEASURMENT_TEMP)
+ 				{
+					measurment_position = 0; 
+					xSemaphoreGive(file_Mutex);
+					vTaskDelay(pdMS_TO_TICKS(200));
+					ms_correct++;
+					xSemaphoreTake(file_Mutex, portMAX_DELAY);
+				} 	
+				if(TS_active)
+				{
+					xSemaphoreGive(server_Mutex);
+					vTaskDelay(pdMS_TO_TICKS(200));
+					ms_correct++;
+					xSemaphoreTake(server_Mutex, portMAX_DELAY);
+				} 		
+			}
+		};
+		delay_ms = (TIME_msr*1000)-((ms_correct-1)*200);
+		vTaskDelay(pdMS_TO_TICKS((delay_ms>0) ? delay_ms : 0));
+	}
+}
+
+void DHT_server(void *pvParameters)
+{
+	
+	float temp_save;
+	float hum_save;
+	while (true) 
+	{
+		xSemaphoreTake(server_Mutex, portMAX_DELAY);
+		temp_save = temp;
+		hum_save = hum;
+		xSemaphoreGive(server_Mutex);
+		thingspeak_send_data(temp_save, hum_save);
 	}
 }
 
@@ -601,22 +624,24 @@ void DHT_save(void *pvParameters)
 {
 	float temp_save[MAX_MEASURMENT_TEMP];
 	float hum_save[MAX_MEASURMENT_TEMP];
+	time_t time_save[MAX_MEASURMENT_TEMP];
 	while (true) 
 	{
 		xSemaphoreTake(file_Mutex, portMAX_DELAY);
 		xSemaphoreTake(memory_Mutex, portMAX_DELAY);
 		memcpy(temp_save, temp_memory, sizeof(temp_save));
 		memcpy(hum_save, hum_memory, sizeof(hum_save));
+		memcpy(time_save, time_memory, sizeof(time_save));
 		xSemaphoreGive(file_Mutex);
 		xSemaphoreGive(memory_Mutex);
-		memory_write(temp_save,hum_save);
+		memory_write(temp_save, hum_save, time_save);
 		vTaskDelay(pdMS_TO_TICKS((TIME_msr*1000)+1000));
 	}
 }
 
 void DHT_init()
 {
-	for(uint8_t i = 1; i<MAX_MEASURMENT_TEMP;i++)
+	for(uint8_t i = 0; i<MAX_MEASURMENT_TEMP;i++)
 	{
 		temp_memory[i] = 100.0;
 		hum_memory[i] = 100.0;
@@ -626,8 +651,11 @@ void DHT_init()
 	file_Mutex = xSemaphoreCreateMutex();
 	send_Mutex = xSemaphoreCreateMutex();
 	memory_Mutex = xSemaphoreCreateMutex();
+	server_Mutex = xSemaphoreCreateMutex();
 	xTaskCreate(DHT_readings, "DHT_task1", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
-	xTaskCreate(DHT_save,     "DHT_task2", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+	vTaskDelay(pdMS_TO_TICKS(100));
+	xTaskCreate(DHT_save, "DHT_task2", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+	if(TS_active) xTaskCreate(DHT_server, "DHT_task3", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
 }
  
 /*---------------------------------------------------------------------------------------------------------------------------------------*/
@@ -1069,20 +1097,20 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 	xSemaphoreGive(memory_Mutex);
 	
 	memset(value_buf, 0, sizeof(value_buf));
-	sprintf(value_buf, "%.2f", value_chart_get(temp_save,0,position_save,MAX_MEASURMENT_TEMP));
+	sprintf(value_buf, "%.2f", value_chart_get(temp_save, 0, position_save, MAX_MEASURMENT_TEMP));
 	strcat(buf_tem, value_buf);
 	memset(value_buf, 0, sizeof(value_buf));
-	sprintf(value_buf, "%.2f", value_chart_get(hum_save,0,position_save,MAX_MEASURMENT_TEMP));
+	sprintf(value_buf, "%.2f", value_chart_get(hum_save, 0, position_save, MAX_MEASURMENT_TEMP));
 	strcat(buf_hum, value_buf);
 	for(uint8_t i=1; i<20; i++)
 	{
-	    if((value_chart_get(temp_save,i,position_save,MAX_MEASURMENT_TEMP)>99.0)||(value_chart_get(hum_save,i,position_save,MAX_MEASURMENT_TEMP)>99.0)) 
+	    if((value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP)>99.0)||(value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP)>99.0)) 
 	 		continue;
 		memset(value_buf, 0, sizeof(value_buf));
-		sprintf(value_buf, ",%.2f", value_chart_get(temp_save,i,position_save,MAX_MEASURMENT_TEMP));
+		sprintf(value_buf, ",%.2f", value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP));
 		strcat(buf_tem, value_buf);
 		memset(value_buf, 0, sizeof(value_buf));
-		sprintf(value_buf, ",%.2f", value_chart_get(hum_save,i,position_save,MAX_MEASURMENT_TEMP));
+		sprintf(value_buf, ",%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
 		strcat(buf_hum, value_buf);
 	}
 	strcat(buf_tem, "]");
@@ -1177,7 +1205,6 @@ void app_main(void)
 	nvs_setup();
 	memory_init();
 	wifi_init();
-	thingspeak_init();
 	DHT_init();
 	sntp_custom_init();
     setup_server();
