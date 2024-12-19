@@ -54,7 +54,7 @@
 #define MAX_MEASURMENT_TEMP			30
 #define MAX_MEASURMENT_FILE			3000
 
-#define value_chart_get(tab, num, pos, max) 	tab[((pos-num)>=0)?(pos-num):(max-num)]
+#define value_chart_get(tab, num, pos, max) 	tab[((pos-num)>=0)?(pos-num):(max+(pos-num))]
 
 static const char *TAG_AP = "wifi softAP";
 static const char *TAG_ST = "wifi station";
@@ -263,7 +263,8 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "<script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js'></script>\n"
                      "<head>\n"
                      "	<title>ESP-IDF DHT11 Web Server</title>\n"
-                     "  <meta name='viewport' content='width=device-width, initial-scale=1'>      \n"
+                     "  <meta http-equiv='refresh' content='10'>\n"
+                     "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
                      "		body {  margin: 0;}\n"
@@ -287,24 +288,24 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "		</div>\n"
                      "	</div>\n"
                      "<script>\n"
-					 "const msn = %d\n"
-					 "const xValues = [-1*msn,-2*msn,-3*msn,-4*msn,-5*msn,-6*msn,-7*msn,-8*msn,-9*msn,-10*msn,-11*msn,-12*msn,-13*msn,-14*msn,-15*msn,-16*msn,-17*msn,-18*msn,-19*msn,-20*msn]\n"
+					 "const xValues = %s]\n"
                      "new Chart('myChart', {\n"
                      "  type: 'line',\n"
                      "  data: {\n"
                      "    labels: xValues,\n"
                      "    datasets: [{ \n"
-                     "      data: %s,\n"
+                     "      data: %s],\n"
                      "      borderColor: 'red',\n"
                      "      fill: false\n"
                      "    }, { \n"
-                     "      data: %s,\n"
+                     "      data: %s],\n"
                      "      borderColor: 'blue',\n"
                      "      fill: false\n"
                      "    }]\n"
                      "  },\n"
                      "  options: {\n"
-                     "    legend: {display: false}\n"
+                     "    legend: {display: false},\n"
+					 "    animation: {duration: 0}\n"
                      "  }\n"
                      "});\n"
                      "</script>\n"
@@ -1081,41 +1082,64 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 {
 	float temp_save[MAX_MEASURMENT_TEMP];
 	float hum_save[MAX_MEASURMENT_TEMP];
+	time_t time_save[MAX_MEASURMENT_TEMP];
 	int8_t position_save;
     int response;
     char response_data[sizeof(chrt_page) + 500];
     char strftime_buf[64];
     char buf_tem[150] = "[";
     char buf_hum[150] = "[";
+    char buf_time[300] = "[";
     char value_buf[10];
+    uint_fast8_t cnter = 0;
+    int8_t i;
+    time_t now;
+    time(&now);
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
 	xSemaphoreTake(memory_Mutex, portMAX_DELAY);
 	position_save = measurment_position-1;
 	memcpy(temp_save, temp_memory, sizeof(temp_save));
 	memcpy(hum_save, hum_memory, sizeof(hum_save));
+	memcpy(time_save, time_memory, sizeof(time_save));
 	xSemaphoreGive(memory_Mutex);
 	
-	memset(value_buf, 0, sizeof(value_buf));
-	sprintf(value_buf, "%.2f", value_chart_get(temp_save, 0, position_save, MAX_MEASURMENT_TEMP));
-	strcat(buf_tem, value_buf);
-	memset(value_buf, 0, sizeof(value_buf));
-	sprintf(value_buf, "%.2f", value_chart_get(hum_save, 0, position_save, MAX_MEASURMENT_TEMP));
-	strcat(buf_hum, value_buf);
-	for(uint8_t i=1; i<20; i++)
+	for(i=19; i>=0; i--)
 	{
-	    if((value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP)>99.0)||(value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP)>99.0)) 
+	    if((value_chart_get(temp_save, i, position_save, MAX_MEASURMENT_TEMP)>99.0) ||
+	       (value_chart_get(hum_save,  i, position_save, MAX_MEASURMENT_TEMP)>99.0) ||
+	       (value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)==0)) 
 	 		continue;
 		memset(value_buf, 0, sizeof(value_buf));
-		sprintf(value_buf, ",%.2f", value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP));
-		strcat(buf_tem, value_buf);
-		memset(value_buf, 0, sizeof(value_buf));
-		sprintf(value_buf, ",%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
-		strcat(buf_hum, value_buf);
+		if(cnter==0)
+		{
+			sprintf(value_buf, "%.2f", value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP));
+			strcat(buf_tem, value_buf);
+			memset(value_buf, 0, sizeof(value_buf));
+			sprintf(value_buf, "%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
+			strcat(buf_hum, value_buf);
+			memset(value_buf, 0, sizeof(value_buf));
+			sprintf(value_buf, "%lld", value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)-now);
+			strcat(buf_time, value_buf);
+		}
+		else
+		{
+			sprintf(value_buf, ",%.2f", value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP));
+			strcat(buf_tem, value_buf);
+			memset(value_buf, 0, sizeof(value_buf));
+			sprintf(value_buf, ",%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
+			strcat(buf_hum, value_buf);
+			memset(value_buf, 0, sizeof(value_buf));
+			sprintf(value_buf, ",%lld", value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)-now);
+			strcat(buf_time, value_buf);
+		} 
+		cnter++;
 	}
-	strcat(buf_tem, "]");
-	strcat(buf_hum, "]");
-    sprintf(response_data, chrt_page, strftime_buf, TIME_msr, buf_tem, buf_hum);
+	for(; cnter<20; cnter++)
+	{
+	   strcat(buf_time, ",''");
+	}
+    sprintf(response_data, chrt_page, strftime_buf, buf_time, buf_tem, buf_hum);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
 }
@@ -1178,6 +1202,7 @@ httpd_handle_t setup_server(void)
     httpd_handle_t server = NULL;
 
 	config.max_uri_handlers = 10;
+	config.stack_size = 8596;
     if (httpd_start(&server, &config) == ESP_OK)
     {
         httpd_register_uri_handler(server, &uri_main);
