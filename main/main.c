@@ -52,7 +52,7 @@
 #define HTTP_QUERY_KEY_MAX_LEN 		100  
 
 #define MAX_MEASURMENT_TEMP			30
-#define MAX_MEASURMENT_FILE			3000
+#define MAX_MEASURMENT_FILE			2300
 
 #define value_chart_get(tab, num, pos, max) 	tab[((pos-num)>=0)?(pos-num):(max+(pos-num))]
 
@@ -549,11 +549,28 @@ bool DHT_check_value(float t, float h)
 	return true;
 }
 
+int DHT_compare(const void* a, const void* b) {
+   return (*(float*)a - *(float*)b);
+}
+
+float DHT_clean_value(float* v)
+{
+	float value=0;
+    qsort( v, 5, sizeof(float), DHT_compare);
+	for(uint8_t i = 1; i<4; i++)
+	{
+		value += v[i];
+	}
+	return(value/3);
+}
+
 void DHT_readings(void *pvParameters)
 {
 	dht11_t dht11_sensor;
 	int8_t ms_correct = 0;
 	int32_t delay_ms = 0;
+	float local_temp[5];
+	float local_hum[5];
     dht11_sensor.dht11_pin = CONFIG_DHT11_PIN;
     ESP_LOGI(TAG_DH, "Start!!" );
     xSemaphoreTake(file_Mutex, portMAX_DELAY);
@@ -563,20 +580,25 @@ void DHT_readings(void *pvParameters)
 		ms_correct = 0;
 		if (xSemaphoreTake(DHT_11_Mutex, portMAX_DELAY))
 		{
-			do 
+			for(uint8_t i=0; i<5; i++) 
 			{
-				if(!dht11_read(&dht11_sensor, CONFIG_CONNECTION_TIMEOUT))
-				{  
-    				temp = dht11_sensor.temperature;
-    				hum = dht11_sensor.humidity;
-				}
-				else 
+				do 
 				{
-					temp = 99.0;
-					hum = 99.0;
-				}
-				ms_correct++;
-			} while(DHT_check_value(temp,hum));
+					if(!dht11_read(&dht11_sensor, CONFIG_CONNECTION_TIMEOUT))
+					{  
+    					local_temp[i] = dht11_sensor.temperature;
+    					local_hum[i] = dht11_sensor.humidity;
+					}
+					else 
+					{
+						local_temp[i] = 99.0;
+						local_hum[i] = 99.0;
+					}
+				} while (DHT_check_value(local_temp[i],local_hum[i]));
+				vTaskDelay(pdMS_TO_TICKS(200));
+			} 
+			temp = DHT_clean_value(local_temp);
+			hum = DHT_clean_value(local_hum);
 			xSemaphoreGive(DHT_11_Mutex);
 			if((temp<99.0) && (hum<99.0))
 			{
@@ -600,9 +622,9 @@ void DHT_readings(void *pvParameters)
 					xSemaphoreTake(server_Mutex, portMAX_DELAY);
 				} 		
 			}
-		};
-		delay_ms = (TIME_msr*1000)-((ms_correct-1)*200);
-		vTaskDelay(pdMS_TO_TICKS((delay_ms>0) ? delay_ms : 0));
+		}
+		delay_ms = (TIME_msr*1000)-((ms_correct+4)*200);
+		vTaskDelay(pdMS_TO_TICKS((delay_ms>0) ? delay_ms : 200));
 	}
 }
 
