@@ -35,26 +35,36 @@
 #include "lwip/sys.h"
 #include "lwip/ip_addr.h"
 
-
+//Wi-fi
 #define CONFIG_SNTP_TIME_SERVER		"pool.ntp.org"
 #define ESP_WIFI_SSID 				"ESP_DHT11"
-#define ESP_WIFI_CHANNEL 			1
+#define ESP_WIFI_CHANNEL 			11
 #define MAX_STA_CONN 				1
-
 #define ESP_MAXIMUM_RETRY 			3
-
 #define WIFI_CONNECTED_BIT 			BIT0
 #define WIFI_FAIL_BIT      			BIT1
+#define HTTP_QUERY_KEY_MAX_LEN 		100  
+#define MAX_SNTP_RETRY 				15  
+#define SNTP_RETRY_TIME_S 		    2
+#define SNTP_PERIOD_TIME_S			3600
 
+//DHT
 #define CONFIG_DHT11_PIN 			GPIO_NUM_9
 #define CONFIG_CONNECTION_TIMEOUT 	5
-
-#define HTTP_QUERY_KEY_MAX_LEN 		100  
-
 #define MAX_MEASURMENT_TEMP			30
 #define MAX_MEASURMENT_FILE			2300
-
+#define MAX_AGAIN					3
+#define AVERAGE_MEMBER				5
+#define MAXIMUM_DIFFERENCE			10.0
+#define PAUSE_TIME_MS			    200
+#define FAIL_VALUE			    	99.0
+#define DEFAULT_PAUSE_TIME_S		10
 #define value_chart_get(tab, num, pos, max) 	tab[((pos-num)>=0)?(pos-num):(max+(pos-num))]
+
+//Web
+#define WEB_ACCES_TIME_MS			5000
+#define RESET_PAUSE_MS				1000
+#define MAX_WEB_CHART_POSITION		20
 
 static const char *TAG_AP = "wifi softAP";
 static const char *TAG_ST = "wifi station";
@@ -65,23 +75,21 @@ static const char *TAG_DH = "dht saved";
 static const char *TAG_TI = "sntp_server";
 static const char *TAG_TS = "thingspeak";
 
+char thingspeak_url[] = "https://api.thingspeak.com/update";
+char data[] = "api_key=%s&field1=%.2f&field2=%.2f";
+
 char *wifi_ssid = NULL;
 char *wifi_pass = NULL;
 char *APIkey = NULL;
-uint8_t TIME_msr = 2;
 bool TS_active = false;
+bool AP_mode_flag = false;
+FILE* file = NULL;
 
 fpos_t file_pos = 0;
 uint32_t saved_count = 0;
 uint8_t measurment_position = 0;
  
-FILE* file = NULL;
-
-char thingspeak_url[] = "https://api.thingspeak.com/update";
-char data[] = "api_key=%s&field1=%.2f&field2=%.2f";
-
 static EventGroupHandle_t s_wifi_event_group;
-
 esp_vfs_spiffs_conf_t conf_memory = { .base_path = "/spiffs",
 							   		  .partition_label = NULL,
       						   		  .max_files = 5,
@@ -94,11 +102,10 @@ SemaphoreHandle_t memory_Mutex;
 SemaphoreHandle_t server_Mutex;
 nvs_handle_t my_nvs_handle;  
 
+float temp = FAIL_VALUE;
+float hum= FAIL_VALUE;
+uint8_t TIME_msr = DEFAULT_PAUSE_TIME_S;
 static int s_retry_num = 0;
-
-float temp;
-float hum;
-
 float temp_memory[MAX_MEASURMENT_TEMP] = {0};
 float hum_memory[MAX_MEASURMENT_TEMP] = {0};
 time_t time_memory[MAX_MEASURMENT_TEMP] = {0};
@@ -115,7 +122,7 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "  <style>\n"
                      "    html {font-family: Arial; display: inline-block; text-align: center;}\n"
                      "    p {  font-size: 1.2rem;}\n"
-                     "    body {  margin: 0;}\n"
+                     "    html, body { height: 100%%; margin: 0; padding: 0;}\n"
                      "    .topnav { overflow: hidden; background-color: #241d4b; color: white; font-size: 1.7rem; }\n"
                      "    .content { padding: 20px; }\n"
                      "    .card { background-color: white; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
@@ -123,11 +130,14 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "    .reading { font-size: 2.8rem; }\n"
                      "    .card.temperature { color: #0e7c7b; }\n"
                      "    .card.humidity { color: #17bebb; }\n"
-                     "    .button { width: 100%; padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px;}\n"	
+                     "    .button { padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px;}\n"	
                      "    .button:active { background-color: #fa0f0f; transform: translateY(2px);}\n"
+                     "	  .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
+					 "	  #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
                      "  </style>\n"
                      "</head>\n"
                      "<body>\n"
+                     "<div id='main-wrapper'>\n"
                      "  <div class='topnav'>\n"
                      "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
                      "  </div>\n"
@@ -145,6 +155,11 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "      <a href='/reset_menu' class='button'><button class='button'>RESET</button></a>\n"                   
                      "    </div>\n"
                      "  </div>\n"
+                     "  <div class='footer'>\n"
+  					 "		<p>Author: Szymon Owczarek<br>\n"
+  					 "		<a href='https://github.com/set1990/DHT_prod' style='color:white;'>https://github.com/set1990/DHT_prod</a></p>\n"
+  					 "  </div>\n"
+  					 "</div>\n"
                      "</body>\n"
                      "</html>";
                      
@@ -156,18 +171,21 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center; }\n"
                      "		p {  font-size: 1.2rem;}\n"
-                     "		body {  margin: 0;}\n"
+                     "      html, body { height: 100%%; margin: 0; padding: 0;}\n"
                      "		.topnav { overflow: hidden; background-color: #241d4b; color: white; font-size: 1.7rem; }\n"
                      "		.content { padding: 20px; }\n"
                      "		.card { background-color:  #abfff9; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
                      "		.cards { max-width: 700px; margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }\n"
                      "		.reading {box-sizing : border-box; font-size: 2.0rem; text-align: center; }\n"
-                     "		.button {box-sizing : border-box; width: 90%; max-width: 700px; padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px; }\n"
+                     "		.button {box-sizing : border-box; width: 75%%; max-width: 700px; padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px; }\n"
                      "		.button:active { background-color: #fa0f0f; transform: translateY(2px);}\n"
                      "		.largerCheckbox { width: 80px; height: 40px;}\n"
-                     "	</style>\n"
+                     "	    .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
+					 "	    #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
+					 "	</style>\n"
                      "</head>\n"
                      "<body>\n"
+                     "<div id='main-wrapper'>"
                      "	<div class='topnav'>\n"
                      "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
                      "	</div>\n"
@@ -190,6 +208,11 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "	</div>\n"
                      "	</div>\n"
                      "	</div>\n"
+                     "  <div class='footer'>\n"
+  					 "		<p>Author: Szymon Owczarek<br>\n"
+  					 "		<a href='https://github.com/set1990/DHT_prod' style='color:white;'>https://github.com/set1990/DHT_prod</a></p>\n"
+					 "	</div>\n"
+					 "</div>\n"
                      "</body>\n"
                      "</html>";
 
@@ -201,15 +224,19 @@ char  saved_page[] = "<!DOCTYPE html>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"      
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
-                     "		body {  margin: 0;}\n"
+                     "		p {  font-size: 1.2rem;}\n"
+                     "      html, body { height: 100%%; margin: 0; padding: 0;}\n"
                      "		.topnav { overflow: hidden; background-color: #241d4b; color: white; font-size: 1.7rem; }\n"
                      "		.content { padding: 20px; }\n"
                      "		.card { background-color:  #e6f2ff; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
                      "		.one { color: #0ffa6d; }\n"
                      "		.cards { margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }\n"
+                     "	    .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
+					 "	    #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
                      "	</style>\n"
                      "</head>\n"
                      "<body>\n"
+                     "<div id='main-wrapper'>"
                      "	<div class='topnav'>\n"
                      "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
                      "  </div>\n"
@@ -221,6 +248,11 @@ char  saved_page[] = "<!DOCTYPE html>\n"
                      "			</div>\n"
                      "		</div>\n"
                      "	</div>\n"
+                     "  <div class='footer'>\n"
+  					 "		<p>Author: Szymon Owczarek<br>\n"
+  					 "		<a href='https://github.com/set1990/DHT_prod' style='color:white;'>https://github.com/set1990/DHT_prod</a></p>\n"
+					 "	</div>\n"
+					 "</div>\n"
                      "</body>\n"
                      "</html>";              
 
@@ -232,17 +264,19 @@ char res_me_page[] = "<!DOCTYPE html>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
                      "		p {  font-size: 1.2rem;}\n"
-                     "		body {  margin: 0;}\n"
+                     "      html, body { height: 100%%; margin: 0; padding: 0;}\n"
                      "		.topnav { overflow: hidden; background-color: #241d4b; color: white; font-size: 1.7rem; }\n"
                      "		.content { padding: 20px; }\n"
                      "		.card { background-color:  #abfff9; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
                      "		.cards { max-width: 700px; margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }\n"
-                     "		.reading { width: 80%; font-size: 2.0rem; text-align: center; }\n"
-                     "		.button { box-sizing : border-box; width: 80%;  padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px;}\n"
+                     "		.button { box-sizing : border-box; width: 75%%;  padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px;}\n"
                      "		.button:active { background-color: #fa0f0f; transform: translateY(2px);}\n"
+                     "	    .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
+					 "	    #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
                      "	</style>\n"
                      "</head>\n"
                      "<body>\n"
+                     "<div id='main-wrapper'>"
                      "	<div class='topnav'>\n"
                      "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
                      "    </div>\n"
@@ -255,6 +289,11 @@ char res_me_page[] = "<!DOCTYPE html>\n"
                      "		</div>\n"
                      "		</div>\n"
                      "	</div>\n"
+                     "  <div class='footer'>\n"
+  					 "		<p>Author: Szymon Owczarek<br>\n"
+  					 "		<a href='https://github.com/set1990/DHT_prod' style='color:white;'>https://github.com/set1990/DHT_prod</a></p>\n"
+					 "	</div>\n"
+					 "</div>\n"
                      "</body>\n"
                      "</html>\n";
 
@@ -267,21 +306,25 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
-                     "		body {  margin: 0;}\n"
+                     "      p {  font-size: 1.2rem;}\n"
+                     "      html, body { height: 100%%; margin: 0; padding: 0;}\n"
                      "		.topnav { overflow: hidden; background-color: #241d4b; color: white; font-size: 1.7rem; }\n"
                      "		.content { padding: 20px; }\n"
                      "		.card { background-color:  #e6f2ff; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
                      "		.cards { margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); max-width:1000px; }\n"
+                     "	    .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
+					 "	    #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
                      "	</style>\n"
                      "</head>\n"
                      "<body>\n"
+                     "<div id='main-wrapper'>"
                      "	<div class='topnav'>\n"
                      "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
                      "  </div>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
                      "			<div class='card'>\n"
-                     "				<center><canvas id='myChart' style='width:100%;max-width:1000px'></canvas></center>\n"
+                     "				<center><canvas id='myChart' style='width:100%%;max-width:1000px'></canvas></center>\n"
                      "				<p><span style='color:red; font-weight:bold'> Temperatura &#x2015; </span>&emsp;&emsp;\n"
 				   	 "			       <span style='color:blue; font-weight:bold'> Wilgotnosc &#x2015; </span></p>\n"
                      "			</div>\n"
@@ -309,6 +352,11 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "  }\n"
                      "});\n"
                      "</script>\n"
+                     "  <div class='footer'>\n"
+  					 "		<p>Author: Szymon Owczarek<br>\n"
+  					 "		<a href='https://github.com/set1990/DHT_prod' style='color:white;'>https://github.com/set1990/DHT_prod</a></p>\n"
+					 "	</div>\n"
+					 "</div>\n"
                      "</body>\n"
                      "</html>";
 
@@ -409,7 +457,7 @@ void memory_write(float* temp, float* hum, time_t* tim)
 	xSemaphoreTake(send_Mutex, portMAX_DELAY);
     for (uint_fast8_t i=0; i<MAX_MEASURMENT_TEMP; i++) 
     {
-		if((temp[i]>99.0)||(hum[i]>99.0)) continue;
+		if((temp[i]>FAIL_VALUE)||(hum[i]>FAIL_VALUE)) continue;
 		fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
 	}
 	fgetpos(file, &file_pos);
@@ -531,7 +579,8 @@ bool DHT_check_value(float t, float h)
 	static float h_prew = 0.0;
 	static bool first = true;
 	static uint8_t cnt = 0;
-	if((t<99.0) && (h<99.0) && (t>-99.0) && (h>0.0) && (((fabsf(fabsf(t_prew)-fabsf(t))<10.0) && (fabsf(h_prew-h)<10.0)) || first || (cnt>=3)))
+	if((t<FAIL_VALUE) && (h<FAIL_VALUE) && (t>-FAIL_VALUE) && (h>0.0) && 
+	   (((fabsf(fabsf(t_prew)-fabsf(t))<MAXIMUM_DIFFERENCE) && (fabsf(h_prew-h)<MAXIMUM_DIFFERENCE)) || first || (cnt>=MAX_AGAIN)))
 	{
 		cnt = 0;
 		t_prew = t;
@@ -539,13 +588,13 @@ bool DHT_check_value(float t, float h)
 		first = false;
 		return false;
 	}
-	if(cnt>=3) 
+	if(cnt>=MAX_AGAIN) 
 	{
 		cnt = 0;
 		return false;
 	}
 	cnt++;
-	vTaskDelay(pdMS_TO_TICKS(200));
+	vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
 	return true;
 }
 
@@ -556,12 +605,13 @@ int DHT_compare(const void* a, const void* b) {
 float DHT_clean_value(float* v)
 {
 	float value=0;
-    qsort( v, 5, sizeof(float), DHT_compare);
-	for(uint8_t i = 1; i<4; i++)
+    qsort( v, AVERAGE_MEMBER, sizeof(float), DHT_compare);
+	for(uint8_t i = 1; i<AVERAGE_MEMBER-1; i++)
 	{
 		value += v[i];
 	}
-	return(value/3);
+	value/=(AVERAGE_MEMBER-2);
+	return value;
 }
 
 void DHT_readings(void *pvParameters)
@@ -569,8 +619,8 @@ void DHT_readings(void *pvParameters)
 	dht11_t dht11_sensor;
 	int8_t ms_correct = 0;
 	int32_t delay_ms = 0;
-	float local_temp[5];
-	float local_hum[5];
+	float local_temp[AVERAGE_MEMBER];
+	float local_hum[AVERAGE_MEMBER];
     dht11_sensor.dht11_pin = CONFIG_DHT11_PIN;
     ESP_LOGI(TAG_DH, "Start!!" );
     xSemaphoreTake(file_Mutex, portMAX_DELAY);
@@ -580,7 +630,7 @@ void DHT_readings(void *pvParameters)
 		ms_correct = 0;
 		if (xSemaphoreTake(DHT_11_Mutex, portMAX_DELAY))
 		{
-			for(uint8_t i=0; i<5; i++) 
+			for(uint8_t i=0; i<AVERAGE_MEMBER; i++) 
 			{
 				do 
 				{
@@ -591,16 +641,17 @@ void DHT_readings(void *pvParameters)
 					}
 					else 
 					{
-						local_temp[i] = 99.0;
-						local_hum[i] = 99.0;
+						local_temp[i] = FAIL_VALUE;
+						local_hum[i] = FAIL_VALUE;
 					}
+					ms_correct++;
 				} while (DHT_check_value(local_temp[i],local_hum[i]));
-				vTaskDelay(pdMS_TO_TICKS(200));
+				vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
 			} 
 			temp = DHT_clean_value(local_temp);
 			hum = DHT_clean_value(local_hum);
 			xSemaphoreGive(DHT_11_Mutex);
-			if((temp<99.0) && (hum<99.0))
+			if((temp<FAIL_VALUE) && (hum<FAIL_VALUE))
 			{
 				temp_memory[measurment_position] = temp;
  				hum_memory[measurment_position] = hum;
@@ -610,21 +661,21 @@ void DHT_readings(void *pvParameters)
  				{
 					measurment_position = 0; 
 					xSemaphoreGive(file_Mutex);
-					vTaskDelay(pdMS_TO_TICKS(200));
+					vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
 					ms_correct++;
 					xSemaphoreTake(file_Mutex, portMAX_DELAY);
 				} 	
 				if(TS_active)
 				{
 					xSemaphoreGive(server_Mutex);
-					vTaskDelay(pdMS_TO_TICKS(200));
+					vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
 					ms_correct++;
 					xSemaphoreTake(server_Mutex, portMAX_DELAY);
 				} 		
 			}
 		}
-		delay_ms = (TIME_msr*1000)-((ms_correct+4)*200);
-		vTaskDelay(pdMS_TO_TICKS((delay_ms>0) ? delay_ms : 200));
+		delay_ms = (TIME_msr*1000)-((ms_correct)*PAUSE_TIME_MS);
+		vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
 	}
 }
 
@@ -678,7 +729,7 @@ void DHT_init()
 	xTaskCreate(DHT_readings, "DHT_task1", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
 	vTaskDelay(pdMS_TO_TICKS(100));
 	xTaskCreate(DHT_save, "DHT_task2", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
-	if(TS_active) xTaskCreate(DHT_server, "DHT_task3", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+	if(TS_active &&(AP_mode_flag==false)) xTaskCreate(DHT_server, "DHT_task3", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
 }
  
 /*---------------------------------------------------------------------------------------------------------------------------------------*/
@@ -828,6 +879,7 @@ void wifi_init(void)
 AP_MODE:	
 		ESP_LOGI(TAG_AP, "ESP_WIFI_MODE_AP");
     	wifi_init_softap();
+    	AP_mode_flag = true; 
 	}	
 }
 
@@ -845,27 +897,30 @@ void sntp_notification(struct timeval *tv)
 void sntp_period(void *pvParameters)
 {
 	int retry = 0;
-   	const int retry_count = 15;
+   	const int retry_count = MAX_SNTP_RETRY;
 	while(true)
 	{
   		retry = 0;
-		while (esp_netif_sntp_sync_wait( pdMS_TO_TICKS(2000)) != ESP_OK && ++retry < retry_count) {
+		while (esp_netif_sntp_sync_wait( pdMS_TO_TICKS(SNTP_RETRY_TIME_S*1000)) != ESP_OK && ++retry < retry_count) {
         	ESP_LOGI(TAG_TI, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
    		}
    		ESP_LOGI(TAG_TI, "Time sync");
-		vTaskDelay(pdMS_TO_TICKS(1000*3600));
+		vTaskDelay(pdMS_TO_TICKS(1000*SNTP_PERIOD_TIME_S));
 	}
 }
 
 void sntp_custom_init()
 {
-	esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_SNTP_TIME_SERVER);	
-	esp_netif_sntp_init(&config);
-	config.sync_cb = sntp_notification; 
-	setenv("TZ", "CET", 1);
-    tzset();
-    xTaskCreate(sntp_period, "sntp_task1", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
- 	ESP_LOGI(TAG_TI, "Configurated");
+	if(AP_mode_flag==false)
+	{
+		esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_SNTP_TIME_SERVER);	
+		esp_netif_sntp_init(&config);
+		config.sync_cb = sntp_notification; 
+		setenv("TZ", "CET", 1);
+    	tzset();
+    	xTaskCreate(sntp_period, "sntp_task1", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+ 		ESP_LOGI(TAG_TI, "Configurated");		
+	}
 }
 
 void sntp_tim_to_html(char* strftime_buf, size_t size)
@@ -885,7 +940,7 @@ void sntp_tim_to_html(char* strftime_buf, size_t size)
 
 void run_reset(void *pvParameters)
 {
-	vTaskDelay(pdMS_TO_TICKS(1000));
+	vTaskDelay(pdMS_TO_TICKS(RESET_PAUSE_MS));
 	esp_restart();
 }
 
@@ -896,14 +951,14 @@ esp_err_t send_main_web_page(httpd_req_t *req)
     char strftime_buf[64];
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
-    if (xSemaphoreTake(DHT_11_Mutex, pdMS_TO_TICKS(5000)))
+    if (xSemaphoreTake(DHT_11_Mutex, pdMS_TO_TICKS(WEB_ACCES_TIME_MS)))
 	{
     	sprintf(response_data, main_page, strftime_buf, temp, hum);
     	xSemaphoreGive(DHT_11_Mutex);
     }
     else 
     {
-		sprintf(response_data, main_page, strftime_buf, 255.0, 255.0);
+		sprintf(response_data, main_page, strftime_buf, FAIL_VALUE, FAIL_VALUE);
 	}
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
@@ -934,7 +989,7 @@ esp_err_t send_download_web_page(httpd_req_t *req)
     char downlo_page[1025];
     fpos_t pos_prev;
     const fpos_t pos_run = 0;
-	if(xSemaphoreTake(send_Mutex, pdMS_TO_TICKS(5000)))
+	if(xSemaphoreTake(send_Mutex, pdMS_TO_TICKS(WEB_ACCES_TIME_MS)))
     {
     	fgetpos(file, &pos_prev);
     	fsetpos(file, &pos_run);
@@ -1126,10 +1181,10 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 	memcpy(time_save, time_memory, sizeof(time_save));
 	xSemaphoreGive(memory_Mutex);
 	
-	for(i=19; i>=0; i--)
+	for(i=(MAX_WEB_CHART_POSITION-1); i>=0; i--)
 	{
-	    if((value_chart_get(temp_save, i, position_save, MAX_MEASURMENT_TEMP)>99.0) ||
-	       (value_chart_get(hum_save,  i, position_save, MAX_MEASURMENT_TEMP)>99.0) ||
+	    if((value_chart_get(temp_save, i, position_save, MAX_MEASURMENT_TEMP)>FAIL_VALUE) ||
+	       (value_chart_get(hum_save,  i, position_save, MAX_MEASURMENT_TEMP)>FAIL_VALUE) ||
 	       (value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)==0)) 
 	 		continue;
 		memset(value_buf, 0, sizeof(value_buf));
@@ -1157,7 +1212,7 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 		} 
 		cnter++;
 	}
-	for(; cnter<20; cnter++)
+	for(; cnter<MAX_WEB_CHART_POSITION; cnter++)
 	{
 	   strcat(buf_time, ",''");
 	}
