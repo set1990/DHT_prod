@@ -23,7 +23,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
-#include "esp32-dht11.h"
+#include "DHT22.h"
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
 #include "esp_http_client.h"
@@ -37,34 +37,36 @@
 
 //Wi-fi
 #define CONFIG_SNTP_TIME_SERVER		"pool.ntp.org"
-#define ESP_WIFI_SSID 				"ESP_DHT11"
+#define ESP_WIFI_SSID 				"ESP_DHT22"
 #define ESP_WIFI_CHANNEL 			11
 #define MAX_STA_CONN 				1
-#define ESP_MAXIMUM_RETRY 			3
+#define ESP_MAXIMUM_RETRY 			5
 #define WIFI_CONNECTED_BIT 			BIT0
 #define WIFI_FAIL_BIT      			BIT1
 #define HTTP_QUERY_KEY_MAX_LEN 		100  
 #define MAX_SNTP_RETRY 				15  
 #define SNTP_RETRY_TIME_S 		    2
 #define SNTP_PERIOD_TIME_S			3600
+#define WIFI_CHECK_TIME_S			120
 
 //DHT
-#define CONFIG_DHT11_PIN 			GPIO_NUM_9
+#define CONFIG_DHT22_PIN 			GPIO_NUM_9
 #define CONFIG_CONNECTION_TIMEOUT 	5
 #define MAX_MEASURMENT_TEMP			30
 #define MAX_MEASURMENT_FILE			2300
 #define MAX_AGAIN					3
 #define AVERAGE_MEMBER				5
 #define MAXIMUM_DIFFERENCE			10.0
-#define PAUSE_TIME_MS			    200
+#define PAUSE_TIME_MS			    2200
+#define SMALL_PAUSE_TIME_MS			200
 #define FAIL_VALUE			    	99.0
-#define DEFAULT_PAUSE_TIME_S		10
+#define DEFAULT_PAUSE_TIME_S		12
 #define value_chart_get(tab, num, pos, max) 	tab[((pos-num)>=0)?(pos-num):(max+(pos-num))]
 
 //Web
 #define WEB_ACCES_TIME_MS			5000
-#define RESET_PAUSE_MS				1000
-#define MAX_WEB_CHART_POSITION		20
+#define RESET_PAUSE_MS				10000
+#define MAX_WEB_CHART_POSITION		24
 
 static const char *TAG_AP = "wifi softAP";
 static const char *TAG_ST = "wifi station";
@@ -88,6 +90,7 @@ FILE* file = NULL;
 fpos_t file_pos = 0;
 uint32_t saved_count = 0;
 uint8_t measurment_position = 0;
+uint8_t record_position = 0;
  
 static EventGroupHandle_t s_wifi_event_group;
 esp_vfs_spiffs_conf_t conf_memory = { .base_path = "/spiffs",
@@ -104,7 +107,8 @@ nvs_handle_t my_nvs_handle;
 
 float temp = FAIL_VALUE;
 float hum= FAIL_VALUE;
-uint8_t TIME_msr = DEFAULT_PAUSE_TIME_S;
+uint32_t TIME_msr = DEFAULT_PAUSE_TIME_S;
+uint32_t quan_record = MAX_MEASURMENT_TEMP;
 static int s_retry_num = 0;
 float temp_memory[MAX_MEASURMENT_TEMP] = {0};
 float hum_memory[MAX_MEASURMENT_TEMP] = {0};
@@ -116,7 +120,7 @@ time_t time_memory[MAX_MEASURMENT_TEMP] = {0};
 
 char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "<head>\n"
-                     "  <title>ESP-IDF DHT11 Web Server</title>\n"
+                     "  <title>ESP-IDF DHT22 Web Server</title>\n"
                      "  <meta http-equiv='refresh' content='10 url=/'>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "  <style>\n"
@@ -138,9 +142,10 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>\n"
+                     "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
-                     "  </div>\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "  </div></a>\n"
                      "  <div class='content'>\n"
                      "    <div class='cards'>\n"
                      "      <div class='card temperature'>\n"
@@ -166,7 +171,7 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
 char settin_page[] = "<!DOCTYPE html>\n"
                      "<html>\n"
                      "<head>\n"
-                     "	<title>ESP-IDF DHT11 Web Server</title>\n"
+                     "	<title>ESP-IDF DHT22 Web Server</title>\n"
                      "	<meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center; }\n"
@@ -186,9 +191,10 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>"
-                     "	<div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
-                     "	</div>\n"
+                     "	<a href='/' style='text-decoration:none'>\n"
+                     "  <div class='topnav'>\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "  </div></a>\n"
                      "	<div class='content'>\n"
                      "	<div class='cards'>\n"
                      "	<div class='card'>\n"
@@ -198,7 +204,9 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "			<label for='PASS' class='reading'>Haslo do sieci:</label><br>\n"
                      "			<input type='text' id='PASS' name='PASS' value='%s' class='reading' size='10'><br><br>\n"
 	                 "			<label for='TIME_msr' class='reading'>Czas pomiaru: </label>\n"
-                     "			<input type='number' id='TIME_msr' name='TIME_msr' min='2' max='60' class='reading' value='%d'><br><br>\n"
+                     "			<input type='number' id='TIME_msr' name='TIME_msr' min='12' max='86400' class='reading' value='%d'><br><br>\n"
+	                 "			<label for='quan_record' class='reading'>Pomiarow na zapis: </label>\n"
+                     "			<input type='number' id='quan_record' name='quan_record' min='2' max='30' class='reading' value='%d'><br><br>\n"
                      "			<label for='TS_active'' class='reading'>Uzywaj ThingSpeak:</label>\n"
                      "			<input type='checkbox' id='TS_active' name='TS_active' value='yes' class='largerCheckbox' %s><br><br>\n"
  					 "			<label for='APIkey' class='reading'>API key:</label><br>\n"
@@ -219,8 +227,8 @@ char settin_page[] = "<!DOCTYPE html>\n"
 char  saved_page[] = "<!DOCTYPE html>\n"
                      "<html>\n"
                      "<head>\n"
-                     "	<title>ESP-IDF DHT11 Web Server</title>\n"
-                     "  <meta http-equiv='refresh' content='10 url=/reset'>\n" 
+                     "	<title>ESP-IDF DHT22 Web Server</title>\n"
+                     "  <meta http-equiv='refresh' content='20 url=/'>\n" 
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"      
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
@@ -237,9 +245,10 @@ char  saved_page[] = "<!DOCTYPE html>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>"
-                     "	<div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
-                     "  </div>\n"
+                     "	<a href='/' style='text-decoration:none'>\n"
+                     "  <div class='topnav'>\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
                      "			<div class='card'>\n"
@@ -259,7 +268,7 @@ char  saved_page[] = "<!DOCTYPE html>\n"
 char res_me_page[] = "<!DOCTYPE html>\n"
                      "<html>\n"
                      "<head>\n"
-                     "	<title>ESP-IDF DHT11 Web Server</title>\n"
+                     "	<title>ESP-IDF DHT22 Web Server</title>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
@@ -277,9 +286,10 @@ char res_me_page[] = "<!DOCTYPE html>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>"
-                     "	<div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
-                     "    </div>\n"
+                     "	<a href='/' style='text-decoration:none'>\n"
+                     "  <div class='topnav'>\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
                      "		<div class='card'>\n"
@@ -301,7 +311,7 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "<html>\n"
                      "<script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js'></script>\n"
                      "<head>\n"
-                     "	<title>ESP-IDF DHT11 Web Server</title>\n"
+                     "	<title>ESP-IDF DHT22 Web Server</title>\n"
                      "  <meta http-equiv='refresh' content='10'>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "	<style>\n"
@@ -318,9 +328,10 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>"
-                     "	<div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT11 WEB SERVER</h3>%s\n"
-                     "  </div>\n"
+                     "	<a href='/' style='text-decoration:none'>\n"
+                     "  <div class='topnav'>\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
                      "			<div class='card'>\n"
@@ -454,12 +465,30 @@ void memory_init(void)
 
 void memory_write(float* temp, float* hum, time_t* tim)
 {    
+	static uint8_t last_pos = 0;
 	xSemaphoreTake(send_Mutex, portMAX_DELAY);
-    for (uint_fast8_t i=0; i<MAX_MEASURMENT_TEMP; i++) 
-    {
-		if((temp[i]>FAIL_VALUE)||(hum[i]>FAIL_VALUE)) continue;
-		fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
+	if(measurment_position>=last_pos)
+	{
+		for (uint_fast8_t i=last_pos; i<measurment_position; i++) 
+    	{
+			if((temp[i]>FAIL_VALUE)||(hum[i]>FAIL_VALUE)) continue;
+			fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
+		}
 	}
+	else 
+	{
+		for (uint_fast8_t i=last_pos; i<MAX_MEASURMENT_TEMP; i++) 
+    	{
+			if((temp[i]>FAIL_VALUE)||(hum[i]>FAIL_VALUE)) continue;
+			fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
+		}
+		for (uint_fast8_t i=0; i<=measurment_position; i++) 
+    	{
+			if((temp[i]>FAIL_VALUE)||(hum[i]>FAIL_VALUE)) continue;
+			fprintf(file, "%.2f, %.2f, %lld[s]\n", temp[i], hum[i], tim[i]);
+		}
+	}
+	last_pos = (measurment_position<MAX_MEASURMENT_TEMP) ? measurment_position : 0;
 	fgetpos(file, &file_pos);
 	fflush(file);
 	saved_count++;
@@ -554,10 +583,12 @@ void nvs_setup(void)
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "saved_count", &saved_count, sizeof(fpos_t)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "TIME_msr", &TIME_msr, sizeof(TIME_msr)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "TS_active", &TS_active, sizeof(TS_active)));
+    ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "quan_record", &quan_record, sizeof(quan_record)));
     ESP_LOGI(TAG_NV,"file_pos = %d", (int)file_pos);
     ESP_LOGI(TAG_NV,"saved_count = %d", (int)saved_count);
     ESP_LOGI(TAG_NV,"TIME_msr = %d", (int)TIME_msr);
     ESP_LOGI(TAG_NV,"TS_active = %d", (int)TS_active);
+    ESP_LOGI(TAG_NV,"quan_record = %d", (int)quan_record);
 	if(APIkey) ESP_LOGI(TAG_NV,"APIkey = %s", APIkey);
 }
 
@@ -616,67 +647,70 @@ float DHT_clean_value(float* v)
 
 void DHT_readings(void *pvParameters)
 {
-	dht11_t dht11_sensor;
 	int8_t ms_correct = 0;
+	int8_t ms_correct_small=0;
 	int32_t delay_ms = 0;
 	float local_temp[AVERAGE_MEMBER];
 	float local_hum[AVERAGE_MEMBER];
-    dht11_sensor.dht11_pin = CONFIG_DHT11_PIN;
+    setDHTgpio(CONFIG_DHT22_PIN);
     ESP_LOGI(TAG_DH, "Start!!" );
     xSemaphoreTake(file_Mutex, portMAX_DELAY);
     xSemaphoreTake(server_Mutex, portMAX_DELAY);
 	while(true)
 	{
 		ms_correct = 0;
+		ms_correct_small = 0;
+		for(uint8_t i=0; i<AVERAGE_MEMBER; i++) 
+		{
+			do 
+			{
+				if(!errorHandler(readDHT()))
+				{  
+    				local_temp[i] = getTemperature();
+    				local_hum[i] = getHumidity();
+				}
+				else 
+				{
+					local_temp[i] = FAIL_VALUE;
+					local_hum[i] = FAIL_VALUE;
+				}
+				ms_correct++;
+			} while (DHT_check_value(local_temp[i],local_hum[i]));
+			vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
+		} 
 		if (xSemaphoreTake(DHT_11_Mutex, portMAX_DELAY))
 		{
-			for(uint8_t i=0; i<AVERAGE_MEMBER; i++) 
-			{
-				do 
-				{
-					if(!dht11_read(&dht11_sensor, CONFIG_CONNECTION_TIMEOUT))
-					{  
-    					local_temp[i] = dht11_sensor.temperature;
-    					local_hum[i] = dht11_sensor.humidity;
-					}
-					else 
-					{
-						local_temp[i] = FAIL_VALUE;
-						local_hum[i] = FAIL_VALUE;
-					}
-					ms_correct++;
-				} while (DHT_check_value(local_temp[i],local_hum[i]));
-				vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
-			} 
 			temp = DHT_clean_value(local_temp);
 			hum = DHT_clean_value(local_hum);
 			xSemaphoreGive(DHT_11_Mutex);
-			if((temp<FAIL_VALUE) && (hum<FAIL_VALUE))
-			{
-				temp_memory[measurment_position] = temp;
- 				hum_memory[measurment_position] = hum;
- 				time(&time_memory[measurment_position]);
- 				measurment_position++;
- 				if(measurment_position>=MAX_MEASURMENT_TEMP)
- 				{
-					measurment_position = 0; 
-					xSemaphoreGive(file_Mutex);
-					vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
-					ms_correct++;
-					xSemaphoreTake(file_Mutex, portMAX_DELAY);
-				} 	
-				if(TS_active)
-				{
-					xSemaphoreGive(server_Mutex);
-					vTaskDelay(pdMS_TO_TICKS(PAUSE_TIME_MS));
-					ms_correct++;
-					xSemaphoreTake(server_Mutex, portMAX_DELAY);
-				} 		
-			}
 		}
-		delay_ms = (TIME_msr*1000)-((ms_correct)*PAUSE_TIME_MS);
-		vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
+		if((temp<FAIL_VALUE) && (hum<FAIL_VALUE))
+		{
+			temp_memory[measurment_position] = temp;
+ 			hum_memory[measurment_position] = hum;
+ 			time(&time_memory[measurment_position]);
+ 			measurment_position++;
+ 			record_position++;
+ 			if(record_position>=quan_record)
+ 			{
+				record_position = 0; 
+				xSemaphoreGive(file_Mutex);
+				vTaskDelay(pdMS_TO_TICKS(SMALL_PAUSE_TIME_MS));
+				ms_correct_small++;
+				xSemaphoreTake(file_Mutex, portMAX_DELAY);
+			}
+			if(measurment_position>=MAX_MEASURMENT_TEMP) measurment_position = 0; 
+			if(TS_active)
+			{
+				xSemaphoreGive(server_Mutex);
+				vTaskDelay(pdMS_TO_TICKS(SMALL_PAUSE_TIME_MS));
+				ms_correct_small++;
+				xSemaphoreTake(server_Mutex, portMAX_DELAY);
+			} 		
+		}
 	}
+	delay_ms = (TIME_msr*1000)-(ms_correct*PAUSE_TIME_MS)-(ms_correct_small*SMALL_PAUSE_TIME_MS);
+	vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
 }
 
 void DHT_server(void *pvParameters)
@@ -738,6 +772,15 @@ void DHT_init()
 
 /*-----------------------------------------------------  WiFi handling ------------------------------------------------------------------*/
 
+void wifi_cheker(void *pvParameters)
+{
+	while(true)
+	{
+		vTaskDelay(pdMS_TO_TICKS(WIFI_CHECK_TIME_S*1000));
+		if(s_retry_num >= ESP_MAXIMUM_RETRY) esp_restart();
+	}
+}
+
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
 	if (event_base == WIFI_EVENT)
@@ -797,9 +840,7 @@ void wifi_init_softap(void)
             							  .channel = ESP_WIFI_CHANNEL,
             							  .max_connection =MAX_STA_CONN,
             							  .authmode = WIFI_AUTH_OPEN,
-            							  .pmf_cfg = { .required = true, },
-        								},
-    							};
+            							  .pmf_cfg = { .required = true, },},};
     
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
@@ -874,7 +915,11 @@ void wifi_init(void)
     if(wifi_ssid != NULL) ESP_LOGI(TAG_ST, "wifi_ssid= %s", wifi_ssid);
     if(wifi_pass != NULL) ESP_LOGI(TAG_ST, "wifi_pass= %s", wifi_pass);
     if((wifi_ssid == NULL) || (wifi_pass == NULL)) goto AP_MODE;
-    if(!wifi_init_sta())
+    if(wifi_init_sta())
+    {
+		xTaskCreate(wifi_cheker, "wifi_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
+	}
+    else
     {
 AP_MODE:	
 		ESP_LOGI(TAG_AP, "ESP_WIFI_MODE_AP");
@@ -938,6 +983,43 @@ void sntp_tim_to_html(char* strftime_buf, size_t size)
 
 /*---------------------------------------------------  Web server handling --------------------------------------------------------------*/
 
+void decode_symbols(char* textin, size_t sizein, char* textout)
+{
+	size_t next=0;
+	char synax[][3] = {"%21", "%27", "%28", "%29", "%3B", "%3A", "%40", "%26", "%3D",
+				       "%2B", "%24", "%2C", "%2F", "%3F", "%25", "%23", "%5B", "%5D"};
+	char replacements[][1] = {"!", "'", "(", ")", ";", ":", "@", "&", "=", "+", 
+		         			  "$", ",", "/", "?", "%", "#", "[", "]"};
+	memset(textout, 0, sizein);
+	for(size_t i=0; i<sizein; i++)
+	{
+		if(textin[i] == '%')
+		{
+			if((i+2)<sizein) 
+			{
+				for(size_t j=0; j<18; j++)
+				{
+					if(strncmp(&textin[i], &synax[j][0], 3) == 0)
+					{
+						textout[next] = replacements[j][0];
+					    ESP_LOGI(TAG_WS, "jest 4 %c", textout[next]);
+						next++;
+						i+=2;
+						break;
+					}			
+				} 
+			}
+			else return;
+		}
+		else 
+		{
+			textout[next] = textin[i];
+			next++;
+		}
+	}
+	return;
+}
+
 void run_reset(void *pvParameters)
 {
 	vTaskDelay(pdMS_TO_TICKS(RESET_PAUSE_MS));
@@ -976,6 +1058,7 @@ esp_err_t send_settings_web_page(httpd_req_t *req)
     									((wifi_ssid) ? wifi_ssid : ""),
     									((wifi_pass) ? wifi_pass : ""),
     									TIME_msr,
+    									quan_record,
     									((TS_active) ? "checked" : ""),
     									((APIkey) ? APIkey : ""));
     									
@@ -1013,7 +1096,8 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 	int ret;
     int response;
 	size_t buf_len;
-    char*  buf;
+    char* buf = NULL; 
+    char buf_out[HTTP_QUERY_KEY_MAX_LEN];
     char param[HTTP_QUERY_KEY_MAX_LEN];
     char response_data[sizeof(saved_page) + 50];
     char strftime_buf[64];
@@ -1033,8 +1117,9 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
     {
     	if(strcmp("",param))
 		{
-			ESP_LOGI(TAG_WS, "NEW SSID=%s", param);
-			ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "wifi_ssid", param));
+			decode_symbols(param,sizeof(param),buf_out);
+			ESP_LOGI(TAG_WS, "NEW SSID=%s", buf_out);
+			ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "wifi_ssid", buf_out));
 		}
     }
     memset(param,0,sizeof(param));
@@ -1042,8 +1127,9 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
     {
 		if(strcmp("",param))
 		{
-	        ESP_LOGI(TAG_WS, "NEW PASWORD=%s", param);			
-	        ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "wifi_pass", param));
+			decode_symbols(param,sizeof(param),buf_out);
+	        ESP_LOGI(TAG_WS, "NEW PASWORD=%s", buf_out);			
+	        ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "wifi_pass", buf_out));
 		}
     }
     memset(param,0,sizeof(param));
@@ -1051,8 +1137,9 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
     {
 		if(strcmp("",param))
 		{
-	        ESP_LOGI(TAG_WS, "NEW APIkey=%s", param);			
-	        ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "APIkey", param));
+			decode_symbols(param,sizeof(param),buf_out);
+	        ESP_LOGI(TAG_WS, "NEW APIkey=%s", buf_out);			
+	        ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "APIkey", buf_out));
 		}
     }
     memset(param,0,sizeof(param));
@@ -1063,6 +1150,16 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 	        ESP_LOGI(TAG_WS, "NEW TIME_msr=%s", param);			
 	        TIME_msr = atoi(param);
 	        ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "TIME_msr", (void*)&TIME_msr, sizeof(TIME_msr)));
+		}
+    }
+    memset(param,0,sizeof(param));
+    if (httpd_query_key_value(buf, "quan_record", param, sizeof(param)) == ESP_OK) 
+    {
+		if(strcmp("",param))
+		{
+	        ESP_LOGI(TAG_WS, "NEW quan_record=%s", param);			
+	        quan_record = atoi(param);
+	        ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "quan_record", (void*)&quan_record, sizeof(quan_record)));
 		}
     }
     memset(param,0,sizeof(param));
@@ -1083,20 +1180,10 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 		TS_active = false;
 	    ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "TS_active", (void*)&TS_active, sizeof(TS_active)));		
 	}
-   
     free(buf);
     sprintf(response_data, saved_page, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
-    return response;
-}
-
-
-esp_err_t send_reset_web_page(httpd_req_t *req)
-{
-    int response;
-    ESP_LOGI(TAG_WS, "restart");
-	response = send_main_web_page(req);
-	xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
 }
 
@@ -1121,6 +1208,7 @@ esp_err_t send_reset_only_web_page(httpd_req_t *req)
     memset(response_data, 0, sizeof(response_data));
     sprintf(response_data, saved_page, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
+    xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
 }
 
@@ -1136,6 +1224,7 @@ esp_err_t send_format_flash_web_page(httpd_req_t *req)
 	memory_clean(false);
     sprintf(response_data, saved_page, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
+    xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
 }
 
@@ -1152,6 +1241,7 @@ esp_err_t send_default_settings_web_page(httpd_req_t *req)
     nvs_flash_erase();
     sprintf(response_data, saved_page, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
+    xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
 }
 
@@ -1241,12 +1331,6 @@ httpd_uri_t uri_sav = { .uri = "/saved",
     				    .handler = send_saved_web_page,
     				    .user_ctx = NULL};
 
-httpd_uri_t uri_res = { .uri = "/reset",
-    				    .method = HTTP_GET,
-    				    .handler = send_reset_web_page,
-    				    .user_ctx = NULL};
-
-
 httpd_uri_t uri_men = { .uri = "/reset_menu",
     				    .method = HTTP_GET,
     				    .handler = send_reset_menu_web_page,
@@ -1278,7 +1362,7 @@ httpd_handle_t setup_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
 
-	config.max_uri_handlers = 10;
+	config.max_uri_handlers = 9;
 	config.stack_size = 8596;
     if (httpd_start(&server, &config) == ESP_OK)
     {
@@ -1286,7 +1370,6 @@ httpd_handle_t setup_server(void)
         httpd_register_uri_handler(server, &uri_set);
         httpd_register_uri_handler(server, &uri_dow);
         httpd_register_uri_handler(server, &uri_sav);
-        httpd_register_uri_handler(server, &uri_res);
         httpd_register_uri_handler(server, &uri_men);
 		httpd_register_uri_handler(server, &uri_onl);
 		httpd_register_uri_handler(server, &uri_frm);
