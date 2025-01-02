@@ -206,7 +206,7 @@ char settin_page[] = "<!DOCTYPE html>\n"
 	                 "			<label for='TIME_msr' class='reading'>Czas pomiaru: </label>\n"
                      "			<input type='number' id='TIME_msr' name='TIME_msr' min='12' max='86400' class='reading' value='%d'><br><br>\n"
 	                 "			<label for='quan_record' class='reading'>Pomiarow na zapis: </label>\n"
-                     "			<input type='number' id='quan_record' name='quan_record' min='2' max='30' class='reading' value='%d'><br><br>\n"
+                     "			<input type='number' id='quan_record' name='quan_record' min='1' max='30' class='reading' value='%d'><br><br>\n"
                      "			<label for='TS_active'' class='reading'>Uzywaj ThingSpeak:</label>\n"
                      "			<input type='checkbox' id='TS_active' name='TS_active' value='yes' class='largerCheckbox' %s><br><br>\n"
  					 "			<label for='APIkey' class='reading'>API key:</label><br>\n"
@@ -228,7 +228,7 @@ char  saved_page[] = "<!DOCTYPE html>\n"
                      "<html>\n"
                      "<head>\n"
                      "	<title>ESP-IDF DHT22 Web Server</title>\n"
-                     "  <meta http-equiv='refresh' content='20 url=/'>\n" 
+                     "  <meta http-equiv='refresh' content='30 url=/'>\n" 
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"      
                      "	<style>\n"
                      "		html {font-family: Arial; display: inline-block; text-align: center;}\n"
@@ -708,9 +708,9 @@ void DHT_readings(void *pvParameters)
 				xSemaphoreTake(server_Mutex, portMAX_DELAY);
 			} 		
 		}
+		delay_ms = (TIME_msr*1000)-(ms_correct*PAUSE_TIME_MS)-(ms_correct_small*SMALL_PAUSE_TIME_MS);
+		vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
 	}
-	delay_ms = (TIME_msr*1000)-(ms_correct*PAUSE_TIME_MS)-(ms_correct_small*SMALL_PAUSE_TIME_MS);
-	vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
 }
 
 void DHT_server(void *pvParameters)
@@ -1257,10 +1257,11 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
     char buf_tem[150] = "[";
     char buf_hum[150] = "[";
     char buf_time[300] = "[";
-    char value_buf[10];
+    char value_buf[15];
     uint_fast8_t cnter = 0;
     int8_t i;
     time_t now;
+    time_t diff_time;
     time(&now);
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
@@ -1278,6 +1279,7 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 	       (value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)==0)) 
 	 		continue;
 		memset(value_buf, 0, sizeof(value_buf));
+		diff_time = now-(value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP));
 		if(cnter==0)
 		{
 			sprintf(value_buf, "%.2f", value_chart_get(temp_save, i, position_save,MAX_MEASURMENT_TEMP));
@@ -1286,7 +1288,7 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 			sprintf(value_buf, "%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
 			strcat(buf_hum, value_buf);
 			memset(value_buf, 0, sizeof(value_buf));
-			sprintf(value_buf, "%lld", value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)-now);
+			sprintf(value_buf, "'-%d:%02d:%02d'", (int)(diff_time/3600),(int)((diff_time%3600)/60),(int)(diff_time%60));
 			strcat(buf_time, value_buf);
 		}
 		else
@@ -1297,7 +1299,7 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 			sprintf(value_buf, ",%.2f", value_chart_get(hum_save, i, position_save,MAX_MEASURMENT_TEMP));
 			strcat(buf_hum, value_buf);
 			memset(value_buf, 0, sizeof(value_buf));
-			sprintf(value_buf, ",%lld", value_chart_get(time_save, i, position_save,MAX_MEASURMENT_TEMP)-now);
+			sprintf(value_buf, ",'-%d:%02d:%02d'", (int)(diff_time/3600),(int)((diff_time%3600)/60),(int)(diff_time%60));
 			strcat(buf_time, value_buf);
 		} 
 		cnter++;
