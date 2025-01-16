@@ -34,6 +34,7 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "lwip/ip_addr.h"
+#include "mdns.h"
 
 //Wi-fi
 #define CONFIG_SNTP_TIME_SERVER		"pool.ntp.org"
@@ -76,15 +77,19 @@ static const char *TAG_ME = "spiffs memory";
 static const char *TAG_DH = "dht saved";
 static const char *TAG_TI = "sntp_server";
 static const char *TAG_TS = "thingspeak";
+static const char *TAG_MD = "mDNS";
 
 char thingspeak_url[] = "https://api.thingspeak.com/update";
 char data[] = "api_key=%s&field1=%.2f&field2=%.2f";
+char ip_addres_text[16] = "192.168.4.1";
 
 char *wifi_ssid = NULL;
 char *wifi_pass = NULL;
 char *APIkey = NULL;
+char *HOSTname = NULL;
 bool TS_active = false;
 bool AP_mode_flag = false;
+bool mdns_active = true;
 FILE* file = NULL;
 
 fpos_t file_pos = 0;
@@ -144,7 +149,7 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "<div id='main-wrapper'>\n"
                      "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>IP: %s<br>%s\n"
                      "  </div></a>\n"
                      "  <div class='content'>\n"
                      "    <div class='cards'>\n"
@@ -193,7 +198,7 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "<div id='main-wrapper'>"
                      "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>IP: %s<br>%s\n"
                      "  </div></a>\n"
                      "	<div class='content'>\n"
                      "	<div class='cards'>\n"
@@ -203,6 +208,10 @@ char settin_page[] = "<!DOCTYPE html>\n"
                      "			<input type='text' id='SSID' name='SSID' value='%s' class='reading' size='10'><br><br>\n"
                      "			<label for='PASS' class='reading'>Haslo do sieci:</label><br>\n"
                      "			<input type='text' id='PASS' name='PASS' value='%s' class='reading' size='10'><br><br>\n"
+					 "			<label for='MDNSA'' class='reading'>Uzywaj mDNS:</label>\n"
+                     "			<input type='checkbox' id='MDNSA' name='MDNSA' value='yes' class='largerCheckbox' %s><br><br>\n"					 
+                     "			<label for='HOSTN' class='reading'>Nazwa Hosta:</label><br>\n"
+                     "			<input type='text' id='HOSTN' name='HOSTN' value='%s' class='reading' size='10'><br><br>\n"
 	                 "			<label for='TIME_msr' class='reading'>Czas pomiaru: </label>\n"
                      "			<input type='number' id='TIME_msr' name='TIME_msr' min='12' max='86400' class='reading' value='%d'><br><br>\n"
 	                 "			<label for='quan_record' class='reading'>Pomiarow na zapis: </label>\n"
@@ -247,7 +256,7 @@ char  saved_page[] = "<!DOCTYPE html>\n"
                      "<div id='main-wrapper'>"
                      "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>IP: %s<br>%s\n"
                      "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
@@ -288,7 +297,7 @@ char res_me_page[] = "<!DOCTYPE html>\n"
                      "<div id='main-wrapper'>"
                      "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>IP: %s<br>%s\n"
                      "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
@@ -330,20 +339,26 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "<div id='main-wrapper'>"
                      "	<a href='/' style='text-decoration:none'>\n"
                      "  <div class='topnav'>\n"
-                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>%s\n"
+                     "    <h3>ESP-IDF DHT22 WEB SERVER</h3>IP: %s<br>%s\n"
                      "  </div></a>\n"
                      "	<div class='content'>\n"
                      "		<div class='cards'>\n"
                      "			<div class='card'>\n"
-                     "				<center><canvas id='myChart' style='width:100%%;max-width:1000px'></canvas></center>\n"
-                     "				<p><span style='color:red; font-weight:bold'> Temperatura &#x2015; </span>&emsp;&emsp;\n"
-				   	 "			       <span style='color:blue; font-weight:bold'> Wilgotnosc &#x2015; </span></p>\n"
+                     "				<center><canvas id='myChartT' style='width:100%%;max-width:1000px'></canvas></center>\n"
+                     "				<p><span style='color:red; font-weight:bold'> Temperatura &#x2015; </span>&emsp;&emsp;</p>\n"
+                     "			</div>\n"
+                     "		</div>\n"   
+                     "		<br>\n"                  
+                     "		<div class='cards'>\n"
+                     "			<div class='card'>\n"
+                     "				<center><canvas id='myChartH' style='width:100%%;max-width:1000px'></canvas></center>\n"
+				   	 "			    <p><span style='color:blue; font-weight:bold'> Wilgotnosc &#x2015; </span></p>\n"
                      "			</div>\n"
                      "		</div>\n"
                      "	</div>\n"
                      "<script>\n"
 					 "const xValues = %s]\n"
-                     "new Chart('myChart', {\n"
+                     "new Chart('myChartT', {\n"
                      "  type: 'line',\n"
                      "  data: {\n"
                      "    labels: xValues,\n"
@@ -351,11 +366,22 @@ char   chrt_page[] = "<!DOCTYPE html>\n"
                      "      data: %s],\n"
                      "      borderColor: 'red',\n"
                      "      fill: false\n"
-                     "    }, { \n"
+                     "    }, ]\n"
+                     "  },\n"
+                     "  options: {\n"
+                     "    legend: {display: false},\n"
+					 "    animation: {duration: 0}\n"
+                     "  }\n"
+                     "});\n"
+                     "new Chart('myChartH', {\n"
+                     "  type: 'line',\n"
+                     "  data: {\n"
+                     "    labels: xValues,\n"
+                     "    datasets: [{ \n"
                      "      data: %s],\n"
                      "      borderColor: 'blue',\n"
                      "      fill: false\n"
-                     "    }]\n"
+                     "    }, ]\n"
                      "  },\n"
                      "  options: {\n"
                      "    legend: {display: false},\n"
@@ -576,20 +602,24 @@ esp_err_t nvs_read_data(nvs_handle_t handle, const char* key, void* out_buf, siz
 void nvs_setup(void)
 {  
     ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &my_nvs_handle));
-    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "wifi_ssid", &wifi_ssid,HTTP_QUERY_KEY_MAX_LEN));
-    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "wifi_pass", &wifi_pass,HTTP_QUERY_KEY_MAX_LEN));
-    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "APIkey", &APIkey,HTTP_QUERY_KEY_MAX_LEN));
+    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "wifi_ssid", &wifi_ssid, HTTP_QUERY_KEY_MAX_LEN));
+    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "wifi_pass", &wifi_pass, HTTP_QUERY_KEY_MAX_LEN));
+    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "APIkey", &APIkey, HTTP_QUERY_KEY_MAX_LEN));
+    ESP_ERROR_CHECK(nvs_read_netwoek_settings(my_nvs_handle, "HOSTname", &HOSTname, HTTP_QUERY_KEY_MAX_LEN));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "file_pos", &file_pos, sizeof(fpos_t)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "saved_count", &saved_count, sizeof(fpos_t)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "TIME_msr", &TIME_msr, sizeof(TIME_msr)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "TS_active", &TS_active, sizeof(TS_active)));
     ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "quan_record", &quan_record, sizeof(quan_record)));
+    ESP_ERROR_CHECK(nvs_read_data(my_nvs_handle, "mdns_active", &mdns_active, sizeof(mdns_active)));
     ESP_LOGI(TAG_NV,"file_pos = %d", (int)file_pos);
     ESP_LOGI(TAG_NV,"saved_count = %d", (int)saved_count);
     ESP_LOGI(TAG_NV,"TIME_msr = %d", (int)TIME_msr);
     ESP_LOGI(TAG_NV,"TS_active = %d", (int)TS_active);
     ESP_LOGI(TAG_NV,"quan_record = %d", (int)quan_record);
+    ESP_LOGI(TAG_NV,"mdns_active = %d", (int)mdns_active);
 	if(APIkey) ESP_LOGI(TAG_NV,"APIkey = %s", APIkey);
+	if(HOSTname) ESP_LOGI(TAG_NV,"HOSTname = %s", HOSTname);
 }
 
 void nvs_format()
@@ -807,6 +837,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
 	else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) 
     {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        sprintf(ip_addres_text, IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG_ST, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -1035,12 +1066,12 @@ esp_err_t send_main_web_page(httpd_req_t *req)
     memset(response_data, 0, sizeof(response_data));
     if (xSemaphoreTake(DHT_11_Mutex, pdMS_TO_TICKS(WEB_ACCES_TIME_MS)))
 	{
-    	sprintf(response_data, main_page, strftime_buf, temp, hum);
+    	sprintf(response_data, main_page, ip_addres_text, strftime_buf, temp, hum);
     	xSemaphoreGive(DHT_11_Mutex);
     }
     else 
     {
-		sprintf(response_data, main_page, strftime_buf, FAIL_VALUE, FAIL_VALUE);
+		sprintf(response_data, main_page, ip_addres_text, strftime_buf, FAIL_VALUE, FAIL_VALUE);
 	}
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
@@ -1054,9 +1085,11 @@ esp_err_t send_settings_web_page(httpd_req_t *req)
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
     
-    sprintf(response_data, settin_page, strftime_buf,
+    sprintf(response_data, settin_page, ip_addres_text, strftime_buf, 
     									((wifi_ssid) ? wifi_ssid : ""),
     									((wifi_pass) ? wifi_pass : ""),
+    									((mdns_active) ? "checked" : ""),
+    									((HOSTname) ? HOSTname : "esp-dht22"),
     									TIME_msr,
     									quan_record,
     									((TS_active) ? "checked" : ""),
@@ -1133,6 +1166,16 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 		}
     }
     memset(param,0,sizeof(param));
+    if (httpd_query_key_value(buf, "HOSTN", param, sizeof(param)) == ESP_OK) 
+    {
+		if(strcmp("",param))
+		{
+			decode_symbols(param,sizeof(param),buf_out);
+	        ESP_LOGI(TAG_WS, "NEW HOSTname=%s", buf_out);			
+	        ESP_ERROR_CHECK(nvs_set_str(my_nvs_handle, "HOSTname", buf_out));
+		}
+    }
+    memset(param,0,sizeof(param));
     if (httpd_query_key_value(buf, "APIkey", param, sizeof(param)) == ESP_OK) 
     {
 		if(strcmp("",param))
@@ -1180,8 +1223,26 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 		TS_active = false;
 	    ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "TS_active", (void*)&TS_active, sizeof(TS_active)));		
 	}
+	memset(param,0,sizeof(param));
+    ret = httpd_query_key_value(buf, "mdns_active", param, sizeof(param));
+    if (ret == ESP_OK) 
+    {  
+		ESP_LOGI(TAG_WS, "NEW mdns_active=%s", param);	
+		if(strcmp("yes",param)==0)
+		{
+	      	
+	       	mdns_active = true;
+	        ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "mdns_active", (void*)&mdns_active, sizeof(mdns_active)));	
+		}
+    }
+    else if(ret == ESP_ERR_NOT_FOUND)
+    {
+		ESP_LOGI(TAG_WS, "NEW mdns_active=NO");			
+		mdns_active = false;
+	    ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "mdns_active", (void*)&mdns_active, sizeof(mdns_active)));		
+	}
     free(buf);
-    sprintf(response_data, saved_page, strftime_buf);
+    sprintf(response_data, saved_page, ip_addres_text, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
@@ -1194,7 +1255,7 @@ esp_err_t send_reset_menu_web_page(httpd_req_t *req)
     char strftime_buf[64];
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
-    sprintf(response_data, res_me_page, strftime_buf);
+    sprintf(response_data, res_me_page, ip_addres_text, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
 }
@@ -1206,7 +1267,7 @@ esp_err_t send_reset_only_web_page(httpd_req_t *req)
     char strftime_buf[64];
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
-    sprintf(response_data, saved_page, strftime_buf);
+    sprintf(response_data, saved_page, ip_addres_text, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
@@ -1222,7 +1283,7 @@ esp_err_t send_format_flash_web_page(httpd_req_t *req)
     xSemaphoreTake(memory_Mutex, portMAX_DELAY);
     xSemaphoreTake(send_Mutex, portMAX_DELAY);
 	memory_clean(false);
-    sprintf(response_data, saved_page, strftime_buf);
+    sprintf(response_data, saved_page, ip_addres_text, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
@@ -1239,7 +1300,7 @@ esp_err_t send_default_settings_web_page(httpd_req_t *req)
     xSemaphoreTake(send_Mutex, portMAX_DELAY);
     memory_clean(true);
     nvs_flash_erase();
-    sprintf(response_data, saved_page, strftime_buf);
+    sprintf(response_data, saved_page, ip_addres_text, strftime_buf);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     xTaskCreate(run_reset, "reset_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     return response;
@@ -1308,7 +1369,7 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
 	{
 	   strcat(buf_time, ",''");
 	}
-    sprintf(response_data, chrt_page, strftime_buf, buf_time, buf_tem, buf_hum);
+    sprintf(response_data, chrt_page, ip_addres_text, strftime_buf, buf_time, buf_tem, buf_hum);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
 }
@@ -1381,6 +1442,33 @@ httpd_handle_t setup_server(void)
     ESP_LOGI(TAG_WS, "Web Server is up and running\n");
     return server;
 }
+ 
+/*---------------------------------------------------------------------------------------------------------------------------------------*/
+
+
+
+/*------------------------------------------------------  mDNS config -------------------------------------------------------------------*/
+
+void mdns_start_service()
+{
+	if(!mdns_active)
+	{
+		ESP_LOGI(TAG_MD, "MDNS disable");
+		return;
+	}
+    //initialize mDNS service
+    esp_err_t err = mdns_init();
+    if (err) 
+    {
+		ESP_LOGI(TAG_MD, "MDNS init failed: %d\n", err);
+        return;
+    }
+
+    //set hostname
+    mdns_hostname_set(((HOSTname) ? HOSTname : "esp-dht22"));
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    ESP_LOGI(TAG_MD, "MDNS init success");
+}
 
 /*---------------------------------------------------------------------------------------------------------------------------------------*/
 
@@ -1395,4 +1483,5 @@ void app_main(void)
 	DHT_init();
 	sntp_custom_init();
     setup_server();
+    mdns_start_service();
 }
