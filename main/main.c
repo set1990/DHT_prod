@@ -55,7 +55,7 @@
 #define CONFIG_CONNECTION_TIMEOUT 	5
 #define MAX_MEASURMENT_TEMP			30
 #define MAX_MEASURMENT_FILE			2300
-#define MAX_AGAIN					3
+#define MAX_AGAIN					2
 #define AVERAGE_MEMBER				5
 #define MAXIMUM_DIFFERENCE			10.0
 #define PAUSE_TIME_MS			    2200
@@ -68,6 +68,8 @@
 #define WEB_ACCES_TIME_MS			5000
 #define RESET_PAUSE_MS				10000
 #define MAX_WEB_CHART_POSITION		24
+#define UNFRESH						(60<(time_send-time_raed))
+#define FAIL_MEASURMENT				((temp == FAIL_VALUE) || (hum == FAIL_VALUE))
 
 static const char *TAG_AP = "wifi softAP";
 static const char *TAG_ST = "wifi station";
@@ -111,7 +113,8 @@ SemaphoreHandle_t server_Mutex;
 nvs_handle_t my_nvs_handle;  
 
 float temp = FAIL_VALUE;
-float hum= FAIL_VALUE;
+float hum = FAIL_VALUE;
+time_t time_raed = 0;
 uint32_t TIME_msr = DEFAULT_PAUSE_TIME_S;
 uint32_t quan_record = MAX_MEASURMENT_TEMP;
 static int s_retry_num = 0;
@@ -120,13 +123,19 @@ float hum_memory[MAX_MEASURMENT_TEMP] = {0};
 time_t time_memory[MAX_MEASURMENT_TEMP] = {0};
 
 
+char fail_color[] = "#fcc2c2;";
+char fresh_color[] = "#b8ffcd;";
+char unfrash_color[] = "#cfcfcf;";
+TaskHandle_t xRead_Handle = NULL;
+TaskHandle_t xSend_Handle = NULL;
+bool block_flag = false;
+httpd_req_t* req_async = NULL;
 
 /*--------------------------------------------------------- HTML section ----------------------------------------------------------------*/
 
 char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "<head>\n"
                      "  <title>ESP-IDF DHT22 Web Server</title>\n"
-                     "  <meta http-equiv='refresh' content='10 url=/'>\n"
                      "  <meta name='viewport' content='width=device-width, initial-scale=1'>\n"
                      "  <style>\n"
                      "    html {font-family: Arial; display: inline-block; text-align: center;}\n"
@@ -137,13 +146,25 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "    .card { background-color: white; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }\n"
                      "    .cards { max-width: 700px; margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }\n"
                      "    .reading { font-size: 2.8rem; }\n"
-                     "    .card.temperature { color: #0e7c7b; }\n"
-                     "    .card.humidity { color: #17bebb; }\n"
+                     "    .card.temperature { color: #0e7c7b; background-color: %s}\n"
+                     "    .card.humidity { color: #17bebb; background-color: %s}\n"
                      "    .button { padding: 15px 50px; font-size: 1.8rem; text-align: center; outline: none; color: #fff; background-color: #0ffa6d; border: #0ffa6d; border-radius: 5px;}\n"	
                      "    .button:active { background-color: #fa0f0f; transform: translateY(2px);}\n"
                      "	  .footer {position: absolute; left: 0; bottom: 0; width: 100%%; background-color: #241d4b; color: white; text-align: center;}\n"
 					 "	  #main-wrapper { min-height: 100%%; padding: 0 0 100px; position: relative;}\n"
                      "  </style>\n"
+                     "  <script>\n"
+                     "		window.onload = function httpGetAsync()\n"
+                     "		{\n"
+                     "			var xmlHttp = new XMLHttpRequest();\n"
+                     "			xmlHttp.onreadystatechange = function() { \n"
+                     "				if (xmlHttp.readyState == 4 && xmlHttp.status == 200)\n"
+                     "					location.reload();\n"
+                     "			}\n"
+                     "			xmlHttp.open('GET', 'order', true);\n"
+                     "			xmlHttp.send(null);\n"
+                     "		}\n"
+                     "  </script>\n"
                      "</head>\n"
                      "<body>\n"
                      "<div id='main-wrapper'>\n"
@@ -159,8 +180,8 @@ char main_page[] =   "<!DOCTYPE HTML><html>\n"
                      "      <div class='card humidity'>\n"
                      "        <h4>HUMIDITY</h4><p><span class='reading'>%.2f</span> &percnt;</span>\n"
                      "      </div>\n"
-                     "      <a href='/value' download='value.csv' class='button'><button class='button'>POBIERZ</button></a>\n"
                      "      <a href='/chart' class='button'><button class='button'>WYKRES</button></a>\n"
+                     "      <a href='/value' download='value.csv' class='button'><button class='button'>POBIERZ</button></a>\n"
                      "      <a href='/settings' class='button'><button class='button'>USTAWIENIA</button></a>\n"
                      "      <a href='/reset_menu' class='button'><button class='button'>RESET</button></a>\n"                   
                      "    </div>\n"
@@ -712,6 +733,7 @@ void DHT_readings(void *pvParameters)
 		{
 			temp = DHT_clean_value(local_temp);
 			hum = DHT_clean_value(local_hum);
+			time(&time_raed);
 			xSemaphoreGive(DHT_11_Mutex);
 		}
 		if((temp<FAIL_VALUE) && (hum<FAIL_VALUE))
@@ -739,7 +761,10 @@ void DHT_readings(void *pvParameters)
 			} 		
 		}
 		delay_ms = (TIME_msr*1000)-(ms_correct*PAUSE_TIME_MS)-(ms_correct_small*SMALL_PAUSE_TIME_MS);
+		block_flag = true;
+		if(xSend_Handle != NULL) xTaskAbortDelay(xSend_Handle);
 		vTaskDelay(pdMS_TO_TICKS((delay_ms>PAUSE_TIME_MS) ? delay_ms : PAUSE_TIME_MS));
+		block_flag = false;
 	}
 }
 
@@ -784,16 +809,24 @@ void DHT_init()
 		temp_memory[i] = 100.0;
 		hum_memory[i] = 100.0;
 	}
-
 	DHT_11_Mutex = xSemaphoreCreateMutex();
 	file_Mutex = xSemaphoreCreateMutex();
 	send_Mutex = xSemaphoreCreateMutex();
 	memory_Mutex = xSemaphoreCreateMutex();
 	server_Mutex = xSemaphoreCreateMutex();
-	xTaskCreate(DHT_readings, "DHT_task1", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+	xTaskCreate(DHT_readings, "DHT_task1", configMINIMAL_STACK_SIZE*10, NULL, 6, &xRead_Handle);
 	vTaskDelay(pdMS_TO_TICKS(100));
-	xTaskCreate(DHT_save, "DHT_task2", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
-	if(TS_active &&(AP_mode_flag==false)) xTaskCreate(DHT_server, "DHT_task3", configMINIMAL_STACK_SIZE*10, NULL, 5, NULL);
+	xTaskCreate(DHT_save, "DHT_task2", configMINIMAL_STACK_SIZE*10, NULL, 7, NULL);
+	if(TS_active &&(AP_mode_flag==false)) xTaskCreate(DHT_server, "DHT_task3", configMINIMAL_STACK_SIZE*10, NULL, 8, NULL);
+}
+
+void DHT_ready(void *pvParameters)
+{
+	vTaskDelay(pdMS_TO_TICKS(30000));
+	httpd_resp_send(pvParameters, "done", 5);
+	httpd_req_async_handler_complete(pvParameters);
+	xSend_Handle = NULL;
+	vTaskDelete(NULL);	
 }
  
 /*---------------------------------------------------------------------------------------------------------------------------------------*/
@@ -1062,17 +1095,26 @@ esp_err_t send_main_web_page(httpd_req_t *req)
     int response;
     char response_data[sizeof(main_page) + 50];
     char strftime_buf[64];
+    time_t time_send = 0;
+    time(&time_send);
     sntp_tim_to_html(strftime_buf, sizeof(strftime_buf));
     memset(response_data, 0, sizeof(response_data));
     if (xSemaphoreTake(DHT_11_Mutex, pdMS_TO_TICKS(WEB_ACCES_TIME_MS)))
 	{
-    	sprintf(response_data, main_page, ip_addres_text, strftime_buf, temp, hum);
+		if(UNFRESH) 
+			sprintf(response_data, main_page, unfrash_color, unfrash_color, ip_addres_text, strftime_buf, temp, hum);
+		else if (FAIL_MEASURMENT)
+			sprintf(response_data, main_page, fail_color, fail_color, ip_addres_text, strftime_buf, temp, hum);
+		else 
+			sprintf(response_data, main_page, fresh_color, fresh_color, ip_addres_text, strftime_buf, temp, hum);
     	xSemaphoreGive(DHT_11_Mutex);
     }
     else 
     {
-		sprintf(response_data, main_page, ip_addres_text, strftime_buf, FAIL_VALUE, FAIL_VALUE);
+		sprintf(response_data, main_page, fail_color, fail_color, ip_addres_text, strftime_buf, FAIL_VALUE, FAIL_VALUE);
 	}
+	time(&time_send);
+	if(block_flag && UNFRESH) xTaskAbortDelay(xRead_Handle);
     response = httpd_resp_send(req, response_data, HTTPD_RESP_USE_STRLEN);
     return response;
 }
@@ -1224,7 +1266,7 @@ esp_err_t send_saved_web_page(httpd_req_t *req)
 	    ESP_ERROR_CHECK(nvs_set_blob(my_nvs_handle, "TS_active", (void*)&TS_active, sizeof(TS_active)));		
 	}
 	memset(param,0,sizeof(param));
-    ret = httpd_query_key_value(buf, "mdns_active", param, sizeof(param));
+    ret = httpd_query_key_value(buf, "MDNSA", param, sizeof(param));
     if (ret == ESP_OK) 
     {  
 		ESP_LOGI(TAG_WS, "NEW mdns_active=%s", param);	
@@ -1374,6 +1416,14 @@ esp_err_t send_chart_web_page(httpd_req_t *req)
     return response;
 }
 
+esp_err_t send_order(httpd_req_t *req)
+{
+    int response;
+    response = httpd_req_async_handler_begin(req, &req_async);
+    xTaskCreate(DHT_ready, "DHT_task4", configMINIMAL_STACK_SIZE*10, req_async, 7, &xSend_Handle);
+    return response;
+}
+
 httpd_uri_t uri_main = { .uri = "/",
     					 .method = HTTP_GET,
     					 .handler = send_main_web_page,
@@ -1418,6 +1468,11 @@ httpd_uri_t uri_chr = { .uri = "/chart",
     				    .method = HTTP_GET,
     				    .handler = send_chart_web_page,
     				    .user_ctx = NULL};  	
+    				    
+httpd_uri_t uri_pa = { .uri = "/order",
+    				    .method = HTTP_GET,
+    				    .handler = send_order,
+    				    .user_ctx = NULL};  
 	
 
 httpd_handle_t setup_server(void)
@@ -1425,7 +1480,7 @@ httpd_handle_t setup_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
 
-	config.max_uri_handlers = 9;
+	config.max_uri_handlers = 10;
 	config.stack_size = 8596;
     if (httpd_start(&server, &config) == ESP_OK)
     {
@@ -1438,6 +1493,7 @@ httpd_handle_t setup_server(void)
 		httpd_register_uri_handler(server, &uri_frm);
 		httpd_register_uri_handler(server, &uri_cln);
 		httpd_register_uri_handler(server, &uri_chr);
+		httpd_register_uri_handler(server, &uri_pa);
     }
     ESP_LOGI(TAG_WS, "Web Server is up and running\n");
     return server;
